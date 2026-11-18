@@ -1,0 +1,96 @@
+# LibreChat configuration for the Alstom AO orchestration layer.
+#
+# The orchestration layer is exposed to end users as a *virtual model*: LibreChat
+# sees an OpenAI-compatible endpoint, AO decides which agents to call, enforces
+# OPA policy, pauses for human approval and traces everything to Langfuse.
+#
+# User identity: LibreChat substitutes {{LIBRECHAT_USER_*}} into the outbound
+# headers, so AO receives the real signed-in user on every request. That is what
+# makes per-user access control, auditing and approvals meaningful from the UI.
+#
+# Bring up:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d api
+#   cd LibreChat && docker compose up -d
+#   http://localhost:3080  ->  model picker  ->  "Alstom Agents"
+version: 1.3.17
+cache: true
+
+interface:
+  # The virtual model is the point of this deployment; keep the landing focused.
+  modelSelect: true
+  parameters: true
+  agents: false
+  prompts: true
+  bookmarks: true
+  customWelcome: 'Ask the Alstom agent platform about invoices, duplicates and payment status.'
+
+registration:
+  # Local accounts only for evaluation. Point this at your IdP before rollout.
+  socialLogins: []
+
+endpoints:
+  custom:
+    - name: 'alstom-ao'
+      # LibreChat matches model specs by endpoint name; keep it stable and short.
+      # AO requires an X-User-Id header; the apiKey below satisfies LibreChat's
+      # schema and is not used by AO for authentication.
+      apiKey: '${ALSTOM_AO_CLIENT_KEY}'
+      baseURL: '${ALSTOM_AO_BASE_URL}'
+      # Only needed when the endpoint host is not public; AO is on the shared
+      # docker network, so it must be allowlisted against SSRF protection.
+      # (Set via ENDPOINTS_ALLOWED_ADDRESSES in compose; kept here for clarity.)
+      models:
+        default: ['alstom-ao']
+        fetch: false
+      titleConvo: false
+      modelDisplayLabel: 'Alstom Agents'
+      # LibreChat suffixes the endpoint name for routing; AO ignores the suffix.
+      # AO answers through its own planner + synthesizer; sampling knobs are
+      # governed server-side by AO_LLM_* and per-run budgets.
+      dropParams:
+        - temperature
+        - top_p
+        - max_tokens
+        - presence_penalty
+        - frequency_penalty
+        - user
+      headers:
+        # Dual identity: the human, plus the service on whose behalf the UI calls.
+        X-User-Id: '{{LIBRECHAT_USER_ID}}'
+        X-User-Email: '{{LIBRECHAT_USER_EMAIL}}'
+        # AO's role vocabulary is exactly ADMIN/USER, matching this UI, so the
+        # LibreChat role is forwarded and normalised case-insensitively by AO
+        # (AO_ROLE_ALIASES). Business roles are not modelled yet; add them at the
+        # IdP and extend AO_ROLE_ALIASES when they exist.
+        X-User-Roles: '{{LIBRECHAT_USER_ROLE}}'
+        X-Service-Id: 'librechat'
+        X-Service-Name: 'librechat-ui'
+        X-Use-Case: 'chat-ui'
+        # Stable per conversation so AO can trace a thread end to end.
+        X-Workflow-Id: '{{LIBRECHAT_BODY_CONVERSATIONID}}'
+        # End-to-end trace: LibreChat's Langfuse trace id for this turn is
+        # sha256(messageId)[:32]. Sending the raw message id lets AO derive the
+        # identical id, so the UI spans and AO's orchestration spans land in ONE
+        # Langfuse trace instead of two.
+        X-Trace-Id: '{{LIBRECHAT_BODY_MESSAGEID}}'
+
+modelSpecs:
+  list:
+    - name: 'alstom-ao'
+      label: 'Alstom Agents'
+      description: >-
+        Routes your question to the right registered agent. Numbers are verified
+        against agent output, and consequential actions pause for human approval.
+      group: 'Alstom'
+      default: true
+      showOnLanding: true
+      conversation_starters:
+        - 'Check invoice INV-2024-0912 for duplicate charges'
+        - 'Create an adjustment for invoice INV-2024-0912'
+        - 'Compare invoice INV-2024-0912 against purchase order PO-7781'
+      preset:
+        endpoint: 'alstom-ao'
+        model: 'alstom-ao'
+        # AO's own system prompt governs routing; instructions here would be
+        # prepended as a user-side instruction and are intentionally minimal.
+        instructions: 'Answer using the Alstom agent platform.'
